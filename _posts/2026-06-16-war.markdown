@@ -4,7 +4,7 @@ title: "I wish there was a war."
 date: 2026-06-15 12:00:00
 categories: thoughts
 tags: featured
-image: "/assets/article_images/2026-06-15-war/post1.jpg"
+image: "/assets/article_images/2026-06-15-war/post1.jpeg"
 ---
 
 **Dear Edward,**
