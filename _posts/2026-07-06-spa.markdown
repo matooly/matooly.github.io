@@ -4,7 +4,7 @@ title: "Dev-Log: Breaking the Rubika Web SPA (A Descent into Madness)"
 date: 2026-07-06 3:20:00
 categories: code
 image: "/assets/article_images/2026-07-06-spa/IMG.PNG"
-image2: "/assets/article_images/2026-07-06-spa/IMG2.PNG"
+image2: "/assets/article_images/2026-07-06-spa/IMG2.png"
 ---
 
 > **03:20 AM, deep flow state.**
