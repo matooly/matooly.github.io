@@ -124,4 +124,6 @@ Once inside, the entire chat DOM became visible. We dropped the Angular payload,
 
 By the time it was over, the bot could launch a persistent Chrome profile, navigate the SPA, bypass Angular's input validation, distinguish visible elements from hidden ghosts, step into sandboxed iframes, deliver the message, and continue to the next user without losing its place.
 
+[Check out the full project here](https://edition.cnn.com/2025/04/17/science/k218b-potential-biosignature-webb/index.html)
+
 None of these problems were difficult because the code was complicated. They were difficult because every layer of the application assumed a human would always be sitting behind a browser. Every  step was less about writing automation and more about understanding how the application actually behaved beneath the UI. Goodnight!
