@@ -1,0 +1,127 @@
+---
+layout: post
+title: "Dev-Log: Breaking the Rubika Web SPA (A Descent into Madness)"
+date: 2025-07-06 3:20:00
+categories: code
+image: "/assets/article_images/2026-07-06-spa/IMG.PNG"
+image2: "/assets/article_images/2026-07-06-spa/IMG.PNG"
+---
+
+> **03:20 AM, deep flow state.**
+>
+> Espresso number three is keeping the lights on. Selenium has trust issues, Angular has declared war on me, and I'm becoming increasingly convinced the DOM tree knows exactly what it's doing.
+
+# Let’s build a headless Rubika broadcaster.
+
+First, we thought it would be easy. Boot up Selenium, log in, search for the user, click the "Message" button, and hit send. It’s just basic web automation, right? Find element by XPath, send keys, click enter. Five minutes, in and out.
+
+Oh, how naive. I am documenting this descent into madness so I never forget the absolute chaos of trying to automate a modern, aggressively sandboxed Single Page Application (SPA). Here is the exact anatomy of how this app fought back at every single step, and the increasingly unhinged lengths we had to go to in order to break it. You can see in the text that I keep using the word "We" which is refereeing my team (me, Claude and gemini). 
+
+# Phase 1: The Frankenstein SPA & The Offline Mode Curse
+
+Our first goal was persisting the login session. Nobody wants to scan a QR code or type an SMS OTP every time they run a script. I tried the classic route: manually ripping out the authentication cookies and injecting LocalStorage into the driver using a saved JSON file.
+
+## The Problem
+
+The bot would launch, bypass the login screen perfectly, and immediately crash into a terrifying "half-loaded" state. The green background rendered, but the UI was shattered. The console was screaming about missing assets. Why? Because Web 3.0 SPAs don't just use cookies anymore. They rely heavily on IndexedDB for chat histories and service workers for state routing. By injecting LocalStorage without the accompanying local databases, we created a Frankenstein browser state. The framework woke up, realized half its brain was missing, assumed we had no internet connection, and threw itself into a fatal offline loop.
+
+## The Fix
+
+We threw away the manual injection entirely and stopped trying to outsmart the browser. We switched to a Native Chrome Profile (`--user-data-dir`). We literally just told Chrome, "Hey, save your own databases to this folder." The next time the bot spun up, it was natively logged in with perfectly synced, uncorrupted databases. The UI loaded flawlessly. One crisis averted.
+
+# Phase 2: The Virtualized Scrolling Nightmare (The Disappearing DOM)
+
+We survived the login. Next up: building the Data Scraper to extract post prices and engagement metrics from the shop's profile grid. We just needed to scroll down the user's feed, click each post, grab the data, and go back. A standard `body.scrollHeight` loop, right? Absolutely not.
+
+## The Problem
+
+Rubika uses a highly aggressive virtualized grid to save memory. As you scroll down, the app actively deletes older posts from the raw HTML. If we told Selenium to scroll to the bottom, the posts vanished from RAM before the bot could even click them. If we tried to iterate through a pre-counted list of 50 posts, the script crashed with a `StaleElementReferenceException` by post #12 because the target no longer existed.
+
+To make matters worse, the UI renders the grid twice during CSS transitions. This leaves invisible "ghost" tiles sitting in the code with stale X/Y coordinates. When Selenium blindly clicked the first `<img>` tag it found, it clicked the ghost, triggering a fatal `ElementClickInterceptedException`.
+
+## The Fix
+
+After burning far too many hours trying every conventional Selenium trick in the book, I handed the problem to Claude. It spent quite a while iterating through different approaches before finally landing on a solution that actually understood how Rubika's virtualized grid behaved.
+
+We had to completely abandon traditional scraping and build a custom spatial-awareness engine.
+
+First, we stopped scrolling globally. We wrote a custom JavaScript injector to target the exact hidden scrollable container (`.rtl-l3f8vc`) and scroll by exactly 250 pixels at a time—just enough to load the next row without un-mounting the current one.
+
+Second, we stopped trusting the HTML. We used JavaScript `getBoundingClientRect()` to map out the physical X/Y coordinates of every tile on the screen, deduplicating them by their actual location on the monitor rather than their DOM tags. Finally, we used `document.elementFromPoint(cx, cy)` to shoot a virtual raycast at the center of the tile. If the ray hit an invisible overlay instead of the post, the script knew it was a ghost, ignored it, and moved on.
+
+We beat the grid.
+
+# Phase 3: Angular's State Manager (The Invisible Wall)
+
+Okay, so we are logged in. We successfully navigated to a profile via the Vitrin search and used a hardware-level click to trigger the **Message** button. The chat UI slides open. We told Selenium to locate the text box and drop the payload using `.send_keys()`.
+
+Nothing happened. The box stayed empty. The send button stayed greyed out.
+
+## The Problem
+
+Inspecting the DOM revealed an absolute nightmare of frontend engineering.
+
+```html
+<textarea name="draftMessage" ng-trim="false" class="ng-untouched ng-pristine" style="display: none;">
+```
+
+Rubika's web client is heavily driven by Angular. The chat input wasn't a standard HTML `<input>` tag; it was a layered `<div>` with `contenteditable="true"`, sitting under an invisible placeholder `span`, sitting next to a hidden `textarea`.
+
+When Selenium forces text into a `div` via `send_keys()`, it bypasses the operating system and violently injects the text straight into the DOM. Angular's state manager (the thing tracking the `ng-pristine` class) completely ignores this because it demands a literal OS-level hardware keystroke to register a change. We tried `ActionChains`. We tried native clipboard pasting (`pyperclip`). The framework swallowed all of it.
+
+## The Fix
+
+A pure JavaScript bypass. We had to stop asking Selenium to act like a user and instead hijack the browser's JavaScript engine directly. We injected this exact payload:
+
+```javascript
+var box = arguments[0];
+box.innerText = arguments[1]; // Inject the raw string directly into the node
+box.dispatchEvent(new Event('input', { bubbles: true })); // Force Angular to wake up
+```
+
+That `dispatchEvent` was the silver bullet. We sent a fake, bubbling input event up the DOM tree. Angular intercepted it, updated its internal tracking, flipped the class to `ng-dirty`, and finally turned the Send button blue.
+
+# Phase 4: Chasing Ghost Elements
+
+So the text injection works. Great. We run the script again. It opens the chat, executes the JavaScript, and... the text doesn't appear. No errors. No crashes. Just silence.
+
+## The Problem
+
+SPAs are incredibly lazy. When you navigate away from a chat page, the framework doesn't delete the old HTML from your RAM; it just hides it by setting `display: none;`. Selenium was blindly searching the document for `//div[contains(@class, 'composer_rich_textarea')]`. It was finding an inactive, hidden chat box from a completely different screen that was still buried in the DOM, and silently typing our message into the void while the real, visible chat box sat entirely empty.
+
+## The Fix
+
+We built a DOM filter. Instead of targeting one element, we scraped every single text box in the raw HTML and ran a hard `.is_displayed()` boolean check on each one. The script iterated through the ghosts until it locked onto the active UI element physically visible on the monitor.
+
+# Phase 5: The Iframe Sandbox (The Final Boss)
+
+We are in the home stretch. Mode 1 (Targeted User) works perfectly. I moved on to Mode 2 (Broadcast to All Contacts). The bot opens the contact list, scrapes the names, searches them up, clicks their profile, the chat opens... and Selenium throws a fatal 15-second `TimeoutException` looking for the text box.
+
+I was losing my mind. I could physically see the text box on my screen. Why was Selenium suddenly blind?
+
+I wrote a massive diagnostic block to pause the script, dump the raw HTML to a text file, and take a screenshot of what Selenium's engine was seeing. The screenshot showed the chat UI perfectly. But when I searched the 1800-line HTML dump for the text box class, I got 0 results.
+
+## The Problem
+
+I scrolled to the very bottom of the raw HTML dump and found this monstrosity:
+
+```html
+<iframe title="test" src="/messenger/index.html?cache=2.5.8..." sandbox="allow-same-origin allow-scripts..."></iframe>
+```
+
+They put the entire chat interface inside an isolated, sandboxed `<iframe>`. The profile page is the parent document, but the actual messaging engine renders inside a portal. Selenium was scanning the main parent document, staring blankly at the profile page, completely unaware that the text box was inside the sandbox.
+
+## The Fix
+
+We had to breach the sandbox. Before looking for the text box, we commanded Selenium's internal context to step inside the iframe:
+
+```python
+iframe_xpath = "//iframe[contains(@src, 'openchat')]"
+self.wait.until(EC.frame_to_be_available_and_switch_to_it((By.XPATH, iframe_xpath)))
+```
+
+Once inside, the entire chat DOM became visible. We dropped the Angular payload, hit ENTER, and then—crucially—executed `self.driver.switch_to.default_content()` to step back out into the main document so the script wouldn't crash when it tried to search for the next user.
+
+By the time it was over, the bot could launch a persistent Chrome profile, navigate the SPA, bypass Angular's input validation, distinguish visible elements from hidden ghosts, step into sandboxed iframes, deliver the message, and continue to the next user without losing its place.
+
+None of these problems were difficult because the code was complicated. They were difficult because every layer of the application assumed a human would always be sitting behind a browser. Every  step was less about writing automation and more about understanding how the application actually behaved beneath the UI. Goodnight!
