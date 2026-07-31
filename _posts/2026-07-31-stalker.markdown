@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "Stalker: A Public Scoreboard for People"
-date: 2026-07-31 17:47:00
+date: 2026-07-31 17:47:00 +0330
 categories: code
 image: "/assets/article_images/2026-07-31-stalker/rate.png"
 image2: "/assets/article_images/2026-07-31-stalker/rate.png"
