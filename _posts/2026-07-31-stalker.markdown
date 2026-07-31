@@ -1,0 +1,127 @@
+---
+layout: post
+title: "Stalker: A Public Scoreboard for People"
+date: 2026-07-31 17:47:00
+categories: code
+image: "/assets/article_images/2026-07-31-stalker/rate.png"
+image2: "/assets/article_images/2026-07-31-stalker/rate.png"
+---
+
+You just met someone.
+
+Could be a girl you’re thinking about dating, a guy you’re about to do a group project with, or some new coworker who already talks too much. They seem fine. Maybe even good.
+
+But you have no idea if they’re actually full of shit.
+
+You don’t know if the last three people who dated them walked away thinking “never again.” You don’t know if their previous teammates quietly prayed they’d drop the class. You don’t know if they’re the type who shows up or the type who ghosts the second work gets real.
+
+That information exists. It’s just locked in group chats, private rants, and the faces of people who already got burned.
+
+**Stalker** is the public version of that information.
+→ [Try it here](https://rate.pythonanywhere.com/)
+
+A big, ugly database of numbers slapped onto real people — looks, personality, style, intelligence, money, body. Crowdsourced scores from the people who actually know them. No comments. No essays. Just the numbers.
+
+It’s the digital equivalent of leaning over to the person next to you and asking:
+
+“Be honest. Is this one worth it or should I run?”
+
+Some people will call it toxic.  
+Some will get their feelings hurt when they see their score.
+
+I don’t really care.  
+I built it anyway.
+
+## The Concept: A Shadow Transcript
+
+Your official transcript says someone got an A in Data Structures.  
+It doesn’t say whether they carried the group project, ghosted until 3 a.m. the night before, or submitted code that looked like it was written by a raccoon.
+
+Stalker fills that gap. Crowdsourced reputation. A living, breathing ranking of the people you actually have to work with.
+
+Is it fair? Probably not.  
+Is it interesting? Extremely.
+
+## The Math: Seed Scores and the “Clamp Lag” Problem
+
+Raw averages are trash for this kind of system. New profiles get destroyed by the first three angry votes, and the whole thing becomes a popularity contest that swings wildly.
+
+So every profile starts with a seed score (I went with 8).  
+Users then vote +1 or –1 on each metric.  
+The backend just does:
+
+`Seed + total upvotes – total downvotes`
+
+Simple. Honest. Trackable.
+
+But the UI has a hard clamp: scores never show above 10 or below 0.
+
+Here’s where it gets spicy.
+
+Imagine someone has a seed of 8 and has already collected five upvotes. True score = 13. The UI shows a clean 10.  
+Someone comes along and downvotes them. True score drops to 12.  
+UI still shows 10.
+
+To the person who just voted, the number didn’t move. It feels broken. That’s **Clamp Lag** — the price you pay for bounding a cumulative sum while still tracking every individual vote.
+
+You could switch to a shared 0–10 slider that updates instantly, but then you lose the ability to know *who* voted and how the score actually evolved. In a system built on judgment, accountability matters more than instant gratification.
+
+## The Stack and the Production Nightmares
+
+Django backend. Vanilla JavaScript frontend. SQLite database. Hosted on a persistent PythonAnywhere server.
+
+This is where the real education happened.
+
+### Lesson 1: The Git Database Wipe
+
+Early on I committed `db.sqlite3` like an absolute rookie.  
+One `git pull --hard` later and every user, every rating, every profile vanished. Git happily overwrote the live database with the empty one from the repo.
+
+**Fix:**
+- `db.sqlite3` goes in `.gitignore`
+- `git rm --cached db.sqlite3`
+- Daily physical backups of both the database and the media folder
+
+GitHub is for code. It is not your backup strategy.
+
+### Lesson 2: Ghost Sessions
+
+After the wipe, the frontend still had old user IDs sitting in Local Storage.  
+It would successfully create a new profile, then try to attach ratings using a user that no longer existed. Django returned 400s. The JavaScript ignored them and redirected anyway. Result: profiles stuck at zero with no way to recover.
+
+Now the frontend actually checks the response before it does anything. Revolutionary, I know.
+
+### Lesson 3: The Golden Backup Ritual
+
+Any migration that touches the schema is high-stakes.  
+My deployment ritual is now religious:
+
+1. Branch the changes  
+2. SSH in and run `cp db.sqlite3 db_safety_snapshot.sqlite3`  
+3. Pull the new code  
+4. Migrate and collectstatic  
+
+If it explodes, the abort button is instant: delete the broken DB, rename the snapshot, checkout main. Sleep well.
+
+---
+
+At the end of the day, this whole thing is just numbers on people.
+
+Some will say it’s toxic. Some will say it’s unfair. Some will get their feelings hurt when they see a 4.2 next to their name and realize the room doesn’t think as highly of them as they do.
+
+Good.
+
+The world already judges you. It just does it quietly, behind your back, in group chats you’ll never see. Stalker just makes the judgment visible and permanent.
+
+Is that dystopian? Probably.  
+Is it useful? Sometimes.  
+Is it going to make some people uncomfortable? Definitely.
+
+I didn’t build this to make friends or fix society.  
+I built it because I wanted to see what happens when you give students a public scoreboard for each other and let the numbers do the talking.
+
+The database is live.  
+The scores are moving.  
+And if yours is low, well… now you know.
+
+→ [Try Stalker here](https://rate.pythonanywhere.com/)
