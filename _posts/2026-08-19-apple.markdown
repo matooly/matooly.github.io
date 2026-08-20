@@ -3,8 +3,8 @@ layout: post
 title: "Project Purple"
 date: 2026-08-19 17:47:00 +0330
 categories: science
-image: "/assets/article_images/2026-08-19-apple.jpeg"
-image2: "/assets/article_images/2026-08-19-apple.jpeg"
+image: "/assets/article_images/2026-08-19-apple/keyboard.jpeg"
+image2: "/assets/article_images/2026-08-19-apple/keyboard.jpeg"
 ---
 
 In 2005, the smartphone industry was completely obsessed with plastic. If you look back at a BlackBerry or a Palm Treo from that era, the screen was almost an afterthought. The entire bottom half of the device was dominated by a fixed, cramped grid of little plastic chiclets. To the rest of the industry, this was just how "serious" business phones were built. To Steve Jobs, it was a massive design flaw.
@@ -45,17 +45,17 @@ He solved this by building a localized predictive model that relied on three dis
 
 ### 1. The Probabilistic Dictionary
 
-**At its core, the keyboard functioned as a character-level $n$-gram model, constantly calculating the conditional probability of the next character in a sequence. Rather than treating each keystroke as an isolated independent event, the software relied on a Markov assumption**specifically that the probability of the next character $c_i$ depends on the preceding $n-1$ characters.**
+At its core, the keyboard functioned as a character-level $n$-gram model, constantly calculating the conditional probability of the next character in a sequence. Rather than treating each keystroke as an isolated independent event, the software relied on a Markov assumption—**specifically that the probability of the next character $c_i$ depends on the preceding $n-1$ characters.**
 
-**Formally, the probability distribution over the vocabulary for the next character is evaluated as:**
+Formally, the probability distribution over the vocabulary for the next character is evaluated as:
 
-**$$P(c_i \vert{} c_1, c_2, \dots, c_{i-1}) \approx P(c_i \vert{} c_{i-(n-1)}, \dots, c_{i-1})$$**
+$$P(c_i \vert{} c_1, c_2, \dots, c_{i-1}) \approx P(c_i \vert{} c_{i-(n-1)}, \dots, c_{i-1})$$
 
-**In practice, if you tapped the letter "T" ($c_1$) and then "H" ($c_2$), the system instantly queried its local lexicon to calculate the Maximum Likelihood Estimation (MLE) for every possible subsequent character. Using a trigram context, the probability of the next letter being "E" is determined by the historical frequency counts within the English language corpus:**
+In practice, if you tapped the letter "T" ($c_1$) and then "H" ($c_2$), the system instantly queried its local lexicon to calculate the Maximum Likelihood Estimation (MLE) for every possible subsequent character. Using a trigram context, the probability of the next letter being "E" is determined by the historical frequency counts within the English language corpus:
 
-**$$P(c_3 = \text{'E'} \mid c_1 = \text{'T'}, c_2 = \text{'H'}) = \frac{\text{Count}(\text{'T'}, \text{'H'}, \text{'E'})}{\text{Count}(\text{'T'}, \text{'H'})}$$**
+$$P(c_3 = \text{'E'} \mid c_1 = \text{'T'}, c_2 = \text{'H'}) = \frac{\text{Count}(\text{'T'}, \text{'H'}, \text{'E'})}{\text{Count}(\text{'T'}, \text{'H'})}$$
 
-**Because the sequence "THE" is statistically dominant, this equation yields an extremely high probability scalar. Conversely, evaluating the likelihood of an impossible sequence**such as $P(c_3 = \text{'Q'} \mid \text{'T'}, \text{'H'})$evaluates to near zero. These calculated probability weights were then used as the direct mathematical inputs to reshape the actual touch zones on the screen.**
+Because the sequence "THE" is statistically dominant, this equation yields an extremely high probability scalar. Conversely, evaluating the likelihood of an impossible sequence—**such as $P(c_3 = \text{'Q'} \mid \text{'T'}, \text{'H'})$**—evaluates to near zero. These calculated probability weights were then used as the direct mathematical inputs to reshape the actual touch zones on the screen.
 
 ### 2. The Dynamic Hit Targets
 
