@@ -1,0 +1,96 @@
+---
+layout: post
+title: "The Reward Isn't the Objective — Part 1: Finding the Crack"
+date: 2026-08-30 2:31:00
+categories: thoughts
+image: "/assets/article_images/2026-09-16-econ/dollar.png"
+image2: "/assets/article_images/2026-09-16-econ/dollar.png"
+---
+
+*Heads up before you start: this is long, and it's part one of two. What began as "let me write a research proposal" turned into weeks of proofs, broken code, and one afternoon where I found out something I'd already written down was flat wrong. If you're just here for the punchline, there's a part 2 coming with the actual results and the repo link. If you want the whole path, make some coffee.*
+
+---
+
+## How this started
+
+I was doing my usual late-night Friday deep dive, casually researching my interests to fill the void in my soul. Once I zeroed in on a specific topic, my friend (an AI, naturally) chimed in: why not make this official and write a research proposal? But "writing a proposal" is a totally different game from "studying AI," which is my actual strong suit. I’d done the hands-on ML stuff before—scikit-learn, PyTorch, the standard toolkit—but reinforcement learning was brand new to me, and applying it to finance was a completely foreign language.
+
+The topic was eventually: reinforcement learning for asset allocation. So I did what you're supposed to do and started reading surveys.
+
+The first one was Bai et al., a 2024 review of RL in finance. It's the kind of paper that's genuinely useful when you're starting from nothing — it catalogues dozens of papers, groups them by application (market making, portfolio management, optimal execution), and does a meta-analysis of what actually seems to work. I read it end to end, mostly to build vocabulary.
+
+Buried in there was a table. It classified the *rewards* people use to train these agents. Plain return. Profit and loss. Sharpe ratio. Differential Sharpe ratio. Variance penalties. Normal stuff, nothing alarming on the surface.
+
+Then there was a sentence that stuck with me more than it probably should have: the survey compared studies using plain return against studies using a "shaped" (risk-adjusted) reward, and said the shaped ones perform better. The p-value for that comparison was 0.120.
+
+That's not significant. And it's not even a fair comparison — it's pooled across papers using different markets, different periods, different algorithms, different everything. I remember thinking: so nobody has actually tested this cleanly. Everyone just... does it, and reports a backtest number.
+
+I didn't think much more of it at the time. I filed it away and moved on to writing a normal proposal — pick a reward, sweep some hyperparameters, run PPO, report Sharpe ratios. Standard stuff. I even got pretty far into planning the experiment before something else got in the way.
+
+## The second survey, and the sentence that changed the whole plan
+
+Someone told me to look at Hambly, Xu, and Yang's 2023 survey too — the more mathematical one, published in *Mathematical Finance* rather than an ML venue. Different audience, different rigor.
+
+And there it was, almost in passing: the mean-variance framework — the thing basically everyone means when they say "risk-adjusted" in finance — is **time-inconsistent**. A strategy that's optimal today is not optimal tomorrow, even if nothing has changed except that time has passed. And because of that, the Bellman equation doesn't hold for it.
+
+I had to sit with that for a minute. Every reinforcement learning algorithm I knew — Q-learning, actor-critic, PPO, all of it — is built on the assumption that you can solve a long problem by solving the next step correctly and then continuing optimally. That's the whole trick. That's what makes RL *work*. And here was a paper telling me, almost as an aside, that the objective everyone in the first survey was implicitly chasing doesn't support that trick at all.
+
+So when someone trains PPO on a Sharpe-ratio reward, sums it over time, and calls the result "risk-adjusted" — what have they actually built? Not the thing they think they built. The algorithm is *correct*, in the sense that it correctly optimizes the sum it was given. It's the sum itself that isn't the thing.
+
+That's when the proposal I'd half-written stopped feeling interesting. Sweeping hyperparameters on a reward nobody had checked the meaning of felt like measuring something without knowing what the ruler was calibrated to.
+
+## First proposal, first rejection (sort of)
+
+I wrote a proposal anyway — a controlled comparison of reward functions, decent statistics, robustness checks. I thought it was solid. It got pushback: no clear method, the gap wasn't obviously real, and — fair — not much actual math in it. Just prose about what I'd measure.
+
+That stung a little, but it was the right call. I'd been describing an *experiment* and calling it a *contribution*. Those aren't the same thing.
+
+## Finding the actual math
+
+I went back to the setting properly this time. Multi-period mean-variance, the Li & Ng (2000) formulation — you get a *pre-committed* optimal policy in closed form, solved by embedding the problem in an auxiliary one. It's affine in wealth: `u*(x) = alpha*x + beta`. Clean.
+
+But because of the time-inconsistency thing, there's a second notion of optimal: the *equilibrium* policy — the one where no future version of you wants to deviate from the plan, given everyone else sticks to it too. Basak and Chabakauri worked this one out. It's a genuinely different policy from the pre-committed one, not just a variant.
+
+So now I had two reference points. Two different "correct" answers to the same question, depending on what you mean by correct.
+
+And then the actual question crystallized: when you train RL on a summed-up risk-adjusted reward, which of these — if either — do you land on?
+
+Nobody had answered that. Not because it's obscure, but because you need *both* closed forms to check against, and most work just runs a backtest and reports whatever number comes out.
+
+## Building it, and immediately breaking it
+
+I started coding. First the pre-committed policy — the Li-Ng closed form. Then a verification step, because I didn't trust myself: I threw a completely independent numerical optimizer at the same problem, with zero knowledge of the closed form, from random starting points. If they agreed, I'd believe it.
+
+They didn't, at first. My first check used Nelder-Mead in 24 dimensions, and it just... didn't converge. It failed silently in a way that made the test *look* like it passed, because all I was checking was "did the optimizer beat my closed form," and a non-convergent optimizer obviously can't beat anything. That's a test that passes even when it's meaningless. I only caught it by looking too closely at the numbers and going "wait, that doesn't look optimized at all."
+
+Swapped in L-BFGS-B with multiple restarts, required agreement in *both* directions. Then it worked — agreement to about 2.6e-12. That felt good. First real "okay, I trust this" moment.
+
+Then I built the equilibrium policy — a genuine backward recursion, trickier than the pre-committed case. Checked it against its own definition directly: at a bunch of wealth levels and time steps, I asked an optimizer to find a better single-period deviation than what my policy prescribed, given everyone else keeps playing the equilibrium strategy. Best improvement found: zero, to machine precision.
+
+There was a nice surprise buried in there too. The equilibrium policy turned out to hold a *constant dollar amount* in risky assets — not a constant fraction of wealth, an actual constant number — while the pre-committed one scales down as wealth grows. Different shapes, not just different numbers. That's a known result in the literature, but reproducing it from scratch was itself reassuring: if my recursion had a bug, it almost certainly wouldn't have reproduced a known structural fact by accident.
+
+## The part where I almost shipped something false
+
+Somewhere in here I got curious about *why* time-inconsistency happens, mechanically, not just abstractly. So I ran an experiment: compute the optimal plan at time zero, let one period pass, then re-solve the exact same problem from scratch at time one. Compare what the original plan says to do against what the fresh solve says to do.
+
+They disagreed — expected, that's the whole point. But the disagreement had a very specific shape: it was a straight line in wealth, and it crossed exactly zero at *one particular wealth level*. I wrote down, casually, that the disagreement was "present everywhere, especially in the tails." Then I actually plotted it and found the opposite: it vanishes exactly at the wealth level your past self expected you'd be at, and grows the further you are from that.
+
+That's a much better fact than the one I almost wrote down. The mechanism turned out to be really clean too — the whole plan is anchored to a multiplier that's pinned by your *expected* terminal wealth, so if reality tracks the plan exactly, nothing needs to change. It's only surprise that breaks consistency. I liked that a lot more than the vague thing I'd have shipped if I hadn't double-checked myself.
+
+## Does the actual gap even exist
+
+At this point I had two exact reference policies but still hadn't shown the thing my whole idea depended on: that training RL on a summed reward gets you somewhere *else*.
+
+Here's the trick that made it possible to check this without touching reinforcement learning at all: the reward practitioners actually write down — "return minus a penalty on the square of return" — turns out to *also* have a closed-form optimum, because summed-up rewards are automatically time-consistent (sums always are). So I could compute the exact maximizer of the *practitioner's reward* and just... compare it directly to the two references. No training, no noise, no excuses.
+
+First thing I checked: the plain-return reward, no risk penalty at all — the single most common choice in the surveyed literature. It has no maximum. At all. Scale up your bets and the expected reward just climbs forever, 0.88, 8, 80, 800, 8000, 80000. The actual risk-averse problem is perfectly well-behaved and bounded; the reward that's supposed to represent it isn't. Anyone training on it isn't solving a hard version of the right problem. They're solving a problem with no answer, and what they get back is whatever their leverage limits happened to allow.
+
+With an actual penalty added in, there *is* a finite optimum — and it's neither of my two reference policies. It's a third thing. And the gap wasn't even one-directional: at the best possible penalty, this "surrogate" policy actually slightly *beat* the equilibrium one on its own terms. Not a worse version of the equilibrium policy — a genuinely different object.
+
+And then the part that made me want to write this whole post: I compared these policies by Sharpe ratio, the thing everyone reports in backtests. The naive choice — set your reward's risk penalty equal to your actual risk aversion, which is the obviously reasonable thing to do — had a *higher* Sharpe ratio than the true equilibrium policy, while having a *lower* value on the actual objective. Backwards. If you evaluated these by the field's normal method, you'd conclude the wrong one is better, on precisely the dimension where it's worse.
+
+I checked that wasn't a fluke by running it across about 500 random markets and risk-aversion levels. The reversal shows up over 90% of the time.
+
+---
+
+That's where part 1 ends — the point where I finally had proof, not just a hunch, that the thing I'd suspected two surveys ago was real. Part 2 picks up with actually training an agent, a decomposition that splits the error into three honest pieces, a mistake I nearly shipped involving a textbook betting strategy, and a result about backtests that I think is the sharpest thing to come out of the whole project. Repo link is at the bottom of part 2.
