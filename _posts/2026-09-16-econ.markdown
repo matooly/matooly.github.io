@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "The Reward Isn't the Objective — Part 1: Finding the Crack"
-date: 2026-08-30 2:31:00
+date: 2026-09-16 2:31:00
 categories: thoughts
 image: "/assets/article_images/2026-09-16-econ/dollar.png"
 image2: "/assets/article_images/2026-09-16-econ/dollar.png"

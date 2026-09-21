@@ -1,0 +1,86 @@
+---
+layout: post
+title: "The Reward Isn't the Objective — Part 2: Closing the Loop"
+date: 2026-09-22 2:31:00
+categories: thoughts
+image: "/assets/article_images/2026-09-16-econ/dollar.png"
+image2: "/assets/article_images/2026-09-16-econ/dollar.png"
+---
+
+*This is part 2. Part 1 covered how I ended up here — two surveys, a suspicious sentence about time-inconsistency, and the moment I finally proved the gap I was chasing was real, not just a hunch. If you haven't read that one, this will still mostly make sense, but the context helps. Same warning as before: this is long. It's the messy, chronological version, mistakes included.*
+
+---
+
+Where part 1 left off: I had two exact reference policies for a multi-period risk-adjusted investing problem, and I'd just shown that the reward people actually train reinforcement learning agents on doesn't land on either of them — it's a third policy, and comparing them by the field's usual metric (Sharpe ratio) gets the ranking backwards more than 90% of the time. That was the proof that the thing was real. What I still didn't have was the *why*, or any sense of how big a deal it actually is once you put a learning algorithm in the loop instead of an exact solver.
+
+## Doing it properly: training an actual agent
+
+At this point I could no longer avoid writing the RL agent, since the whole thing needed one term I hadn't measured yet: how much error comes from imperfect learning, versus the reward itself.
+
+Wrote a simple policy-gradient agent (REINFORCE), deliberately using a policy class that *contains* the exact surrogate solution, so any gap I measured was really about optimization and not about the agent being unable to represent the right answer.
+
+First version was broken in a boring but real way: training got better for a while, then got *worse* the longer I trained it. Took me a minute to realize the exploration-noise term was scaling the gradient by one-over-variance-squared, and as I annealed the exploration down, the gradient variance blew up. Fixed by folding that scaling into the learning rate instead. After that, it converged cleanly.
+
+With a trained agent in hand, I could finally write down the full picture — how much of the gap comes from the philosophical problem (time-inconsistency), how much from the reward shape itself, and how much from imperfect learning:
+
+```
+J(pre-committed) - J(learned agent)
+    = [price of time-inconsistency]
+    + [cost of the surrogate reward]
+    + [learning error]
+```
+
+All three terms, measured, summing up exactly to the total gap — no slack, no fudge.
+
+And here's the finding I actually like best out of the whole project: **which term dominates depends on how risk-averse you are.** At low risk aversion, the time-inconsistency price dominates completely and reward design barely matters. Push risk aversion up, and there's a crossover — somewhere around a risk-aversion parameter of 12 in my test market — past which the *reward design* term takes over and grows, while the time-inconsistency term shrinks. So the honest answer to "does reward shaping actually matter" is: it depends where you are on that curve, and two papers disagreeing about it could just be standing on opposite sides of it without knowing.
+
+## The part where I checked my own work and found I was wrong again
+
+I wanted to sanity-check the whole setup against something simple: the classic "bet a fixed fraction of your wealth to maximize long-run growth" reward (Kelly). I'd written, somewhat confidently, that this reward should trivially match the equilibrium policy, because it's additive and therefore consistent by construction.
+
+Ran it. It doesn't match at all. Not even close — different *shape* entirely. Kelly bets a fraction of wealth; the mean-variance equilibrium bets a constant dollar amount. My reasoning had a hole in it: being *internally consistent* only means dynamic programming is valid for whatever objective you picked. It says nothing about whether that objective happens to be the one you actually wanted. I'd conflated "this reward is well-behaved" with "this reward is correct," and those are different claims.
+
+Small thing, but it meant a whole limiting case I'd been planning to use as a clean sanity check needed to be un-written and rewritten more carefully. Kind of embarrassing, kind of the whole point of checking your own work before anyone else has to.
+
+## The math actually clicks
+
+Somewhere in the middle of all this, I noticed something I should've seen earlier: the surrogate reward, being additive, is *itself* time-consistent, which means its optimal policy satisfies its own clean backward recursion — no numerical search required, an exact recipe. Once I had that in closed form, I could ask sharper questions than "run it and see."
+
+The best one: is there ever a *penalty setting* where the surrogate reward exactly reproduces the true equilibrium policy? Worked through the algebra by hand (with some computer algebra help to check myself), and yes — but only under a specific condition (a risk-free return of exactly 1), and at a very specific penalty:
+
+```
+kappa* = phi * (1 - nu)
+```
+
+not `phi`, the obvious guess. `nu` here is basically a squared Sharpe ratio, scaled by how often you rebalance. The correction is not small — in my test market it moved the "right" penalty from 1.0 down to about 0.81.
+
+I dug at why the correction has that particular shape, and it turned out to shrink toward zero the more frequently you rebalance — annual rebalancing gives an 11% correction, weekly gives basically none. That also explains something that had been bugging me: why hadn't anyone written this down already? Because the classic finance literature on this stuff works in *continuous* time, where the correction is exactly zero by construction. It only shows up once you're forced into discrete steps — which is exactly the situation every RL agent is actually in.
+
+I also sanity-checked my from-scratch equilibrium recursion against an existing continuous-time formula from the literature, by discretizing time into more and more steps and watching it converge. It did — cleanly, at the rate you'd expect. That was a good feeling; deriving something yourself and then watching it agree with someone else's known result from a completely different angle is about as close to "this is probably right" as you get without a formal proof.
+
+## Two more things I hadn't planned on
+
+Two extensions I only got to because I kept asking "okay but does this actually matter in practice."
+
+First: the differential Sharpe ratio, a fancier reward some papers use, involving running estimates of mean and variance. I expected this to need totally new machinery. It didn't — with some algebra it turns out to just *be* a variance-penalized reward again, except the penalty isn't something you choose, it's whatever the market happens to produce through those running estimates. Which means a practitioner using this reward thinks they're setting their own risk preference, but they're actually inheriting one the market picked for them, and nothing in the setup tells them what it is.
+
+(First attempt at measuring this gave a nonsensical number, because the running estimates hadn't had time to converge over a short horizon — a good reminder that "the code ran and gave a number" is not the same as "the number means anything.")
+
+Second, and this one mattered more: everything up to this point assumed returns are independent from one period to the next — a real simplification. So I tested what happens if that's false: fat-tailed returns, clustered volatility, and actual momentum (returns correlated across time). Fat tails and volatility clustering didn't change anything meaningful — the ranking of policies held up fine. But momentum broke it completely. The ordering flipped, and the pre-committed policy — previously the best — collapsed hardest, because its whole plan was calibrated to a drift assumption that momentum violates, and it has no way to notice and adjust.
+
+That's a real limitation, not a footnote, and I said so plainly rather than burying it.
+
+The other thing I checked in that same pass mattered more than I expected: just *how* invisible is this to a normal backtest? I simulated finite numbers of replications and asked how often a Sharpe-ratio comparison would correctly pick the actually-better policy. At 10 replications: about 2% of the time. At 200 or more: essentially never — and it doesn't improve with more data, it gets *more confidently wrong*, because you're estimating the wrong thing with more and more precision. That's the sentence I'd point to if someone asked me to summarize the whole project in one line: **more backtest data does not fix a misspecified reward. It just makes you more sure of the wrong answer.**
+
+## Where it stands
+
+I wrote all this up properly — theorems, proofs, an appendix with the derivation, figures, the works. It's honest about what's solid and what isn't. The proof that the surrogate matches the equilibrium exactly at the right penalty: fully proved. The rate at which the mismatch grows away from that special case: proved for the simplest multi-period case, numerically confirmed beyond that. What happens over longer horizons in full generality: still open.
+
+And I still haven't done a proper, exhaustive search of the finance literature to make sure the central result isn't already sitting in some paper I haven't found — I have a good structural argument for why it might genuinely be new (that continuous-time-versus-discrete-time thing), but an argument for why something *should* be undiscovered isn't the same as confirming it *is*.
+
+If you got this far — through both parts — thank you, genuinely, this was long. All the code, the proofs, the write-up, and a running log of every mistake I made along the way (there were more than I expected, and I tried to leave them all visible rather than tidy them away) is here:
+
+**[github.com/MattTheGreat-root/MVRL-Surrogate-GAP](https://github.com/MattTheGreat-root/MVRL-Surrogate-GAP)**
+
+Everything runs on a laptop in a few minutes, except the full training sweep, which takes about ten. If you find a hole in it, I'd genuinely like to hear about it — several of the best parts of this project came from exactly that.
+
