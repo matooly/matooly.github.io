@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "The Reward Isn't the Objective — Part 2: Closing the Loop"
-date: 2026-09-22 2:31:00
+date: 2026-09-21 2:31:00
 categories: thoughts
 image: "/assets/article_images/2026-09-16-econ/dollar.png"
 image2: "/assets/article_images/2026-09-16-econ/dollar.png"
