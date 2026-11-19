@@ -3,8 +3,8 @@ layout: post
 title: "How I Turned Cloudflare Into a VPN Server (and Got Banned Anyway)"
 date: 2026-11-19 3:20:00
 categories: code
-image: "/assets/article_images/2026-11-19-econ/vpn.png"
-image2: "/assets/article_images/2026-11-19-econ/vpn.png"
+image: "/assets/article_images/2026-11-19-vpn/vpn.png"
+image2: "/assets/article_images/2026-11-19-vpn/vpn.png"
 ---
 
 Do not try this at home.
