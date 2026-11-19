@@ -1,0 +1,289 @@
+---
+layout: post
+title: "How I Turned Cloudflare Into a VPN Server (and Got Banned Anyway)"
+date: 2026-11-19 3:20:00
+categories: code
+image: "/assets/article_images/2026-11-19-econ/vpn.png"
+image2: "/assets/article_images/2026-11-19-econ/vpn.png"
+---
+
+Do not try this at home.
+
+Usually, setting up a proxy means renting a VPS, installing some software, pointing a client at it, and accepting that you now have another server to maintain. There is a process running somewhere, a public IP address, and a networking stack doing the work underneath.
+
+This experiment took a different route: what if the server was a JavaScript file running on Cloudflare’s edge network?
+
+That is the idea behind the Nahan setup I used. A Cloudflare Worker accepts a connection from a proxy client, reads where the client wants to go, opens an outbound connection, and passes data between the two. No VPS to provision. No Linux daemon to keep alive. Just a script sitting between my client and the internet.
+
+Technically, this is a proxy tunnel rather than a full network-layer VPN. I’m using “VPN server” in the familiar sense of the thing my client connects to for getting around network restrictions. That distinction matters once we get into TCP, UDP, and what Workers can actually do.
+
+The interesting part is how much networking fits inside that little script. To explain it properly, I need to start with the server it replaces.
+
+## First, the boring version: rent a server
+
+In a conventional setup, the client connects to a specific server’s public IP address. With OpenVPN or WireGuard, that server handles tunneled network traffic and commonly forwards it using kernel routing and NAT. With an application proxy such as V2Ray, a process accepts the client’s request and creates a separate outbound connection to the destination.
+
+Those approaches can look similar from the user’s side, but they do different things underneath. A VPN forwards network packets; an application proxy relays traffic between connections. That difference becomes useful later.
+
+### Where V2Ray fits
+
+V2Ray, part of Project V, is a modular proxy and routing platform, rather than a single protocol. Its configuration separates the job into three pieces:
+
+- **Inbounds** describe how traffic enters the process. Depending on the core and version, a deployment might use VMess or VLESS over WebSocket or gRPC, protected by TLS.
+- **Outbounds** describe how traffic leaves. A direct outbound, commonly called `freedom` in V2Ray configurations, connects to the requested destination.
+- **Routing rules** decide which outbound handles a particular request.
+
+A typical VPS deployment starts with a Linux machine and a compatible proxy core, such as `v2ray-core` or Xray. A reverse proxy such as Nginx or Caddy can sit in front, manage certificates, terminate TLS, and forward requests for a particular WebSocket path to a local listener.
+
+For example, requests to `/proxy-path` might go to `127.0.0.1:10000`, while ordinary requests receive a website. The proxy process stays running in the background, ready for the next connection.
+
+### The process that never closes its terminal
+
+That background process is a daemon: a long-running program that operates independently of an interactive terminal or user session.
+
+Traditionally, Unix daemons detached themselves by forking, allowing the parent to exit and the child to be adopted by the init process, PID 1. Modern service managers such as `systemd` often supervise a foreground process directly, so self-forking is not a requirement.
+
+Either way, the practical job is the same. The process listens on configured ports, accepts connections, and runs its forwarding logic without needing someone to leave a shell window open.
+
+### What happens to the source address?
+
+Suppose the client wants to reach `google.com`. In an application proxy, the daemon opens a new socket to Google. Google sees the source address of that server-side connection, rather than the client’s original IP.
+
+That does not inherently require the daemon’s traffic to be NATed. If the server has a directly assigned public address, its outbound socket can use that address normally.
+
+NAT becomes relevant when packets cross an address boundary: for example, when a VPN forwards traffic from a private tunnel subnet, or a cloud provider places a server behind a public-address mapping. Source NAT, or SNAT, rewrites the outgoing source address; masquerading is a commonly used form of it.
+
+On Linux, facilities such as Netfilter and connection tracking maintain the information needed to reverse those translations. The `nf_conntrack` machinery tracks flows so returning packets can be mapped back to the correct internal address and port. Socket handling then delivers the data to the appropriate process, or the routing stack forwards it back through the tunnel.
+
+So the conventional architecture has several moving parts: a persistent process, sockets, the operating system’s networking stack, and sometimes NAT. The Worker version still needs those capabilities somewhere. It just stops making them my responsibility.
+
+## The layers hiding inside the connection
+
+Before moving that work to Cloudflare, it helps to separate the protocols involved. VLESS, WebSocket, and TLS are doing different jobs, even when they all travel through the same connection.
+
+### DPI: why port 443 is not enough
+
+A basic firewall can make decisions using network and transport information: IP addresses, protocols, and port numbers, roughly OSI Layers 3 and 4.
+
+Deep Packet Inspection, or DPI, looks further into the traffic. It can examine application-layer payloads when visible, protocol signatures, handshake metadata, and behavioral patterns. For TLS, the Server Name Indication, or SNI, can reveal a hostname when it is not protected by Encrypted ClientHello.
+
+Running something on port 443 does not automatically make it look like ordinary HTTPS. A recognizable handshake or unusual traffic pattern can still give it away.
+
+### VMess and VLESS: the proxy protocol
+
+VMess and VLESS are proxy protocols used in the V2Ray/Xray ecosystem.
+
+**VMess** includes its own authentication and encryption mechanisms. Its authentication is time-sensitive, so excessive clock differences between the client and server can break a connection. Depending on configuration and implementation, payload protection can use algorithms such as AES-GCM or ChaCha20-Poly1305 before the traffic is carried by another transport.
+
+**VLESS** removes the built-in payload encryption and the VMess-style time dependency. In this setup, it relies on TLS to protect the connection. The VLESS header carries authentication information and tells the proxy where to connect.
+
+Removing an extra encryption layer can reduce processing overhead. How much that changes latency or throughput depends on the implementation and the rest of the connection; it is not a guaranteed dramatic speedup.
+
+### WebSocket: the transport wrapper
+
+WebSocket, defined in RFC 6455, provides a persistent, bidirectional channel over a TCP connection. Its familiar HTTP/1.1 form starts with an HTTP request asking to upgrade the connection:
+
+```http
+Upgrade: websocket
+```
+
+After the server accepts the upgrade, both sides exchange WebSocket messages over the established connection.
+
+For a proxy, that gives binary traffic a transport that web infrastructure already understands. A CDN can support the WebSocket connection without understanding the VLESS messages inside it.
+
+This can help traffic pass through infrastructure that permits HTTPS and WebSockets. It does not make the connection undetectable, and a firewall can still block it using the hostname, connection behavior, or other signals.
+
+### TCP and UDP: what is actually being carried?
+
+In a conventional operating system, a socket is a communication endpoint exposed through APIs such as Berkeley sockets. Programs usually access it through a file descriptor. An established connection is identified by its protocol and local and remote addresses and ports; a socket does not always need an explicit application-level bind before connecting.
+
+**TCP** establishes a connection using the SYN, SYN-ACK, ACK handshake. The networking stack tracks sequence numbers, buffers data, retransmits losses, and delivers an ordered byte stream. TLS and the WebSocket transport described here run on top of that stream.
+
+**UDP** sends individual datagrams without a transport-level connection handshake, built-in retransmission, or delivery ordering. It has less transport overhead and is useful for workloads such as DNS and real-time media, including many WebRTC paths. Lower overhead does not mean it is always faster in practice.
+
+The distinction matters here because an outbound TCP API does not automatically provide arbitrary UDP forwarding. Any UDP support needs its own mechanism, such as a limited DNS relay or another transport supported by the implementation.
+
+### gRPC: another transport option
+
+gRPC is an RPC framework originally developed at Google. It commonly uses Protocol Buffers for serialization and HTTP/2 for transport.
+
+Proxy implementations can use a gRPC transport to carry traffic through HTTP/2 streams. HTTP/2 supports concurrent streams over a connection and header compression, which can reduce repeated setup work and make connection reuse useful.
+
+That puts the traffic into a transport also used by ordinary APIs. It does not guarantee that a firewall cannot distinguish it. The Worker walkthrough below uses WebSocket; gRPC is part of the broader proxy architecture, not an additional layer in this particular connection.
+
+### TLS: the outer encryption layer
+
+TLS provides confidentiality, integrity, and peer authentication. In a typical modern HTTPS connection, the server authenticates itself with a certificate, and an ephemeral key exchange such as ECDHE helps establish shared secrets. Symmetric authenticated encryption, such as AES-GCM or ChaCha20-Poly1305, then protects application data.
+
+Here, TLS protects the WebSocket connection carrying VLESS. Someone on the local network cannot simply read the VLESS header or the application bytes inside that outer encryption layer.
+
+They can still observe metadata such as destination IPs, packet sizes, timing, and some handshake information. Encryption hides content; it does not erase the connection’s existence.
+
+## Replacing the VPS with a Worker
+
+With those layers separated, the Nahan setup becomes easier to follow. The `_worker.js` script moves the application-level proxy logic into Cloudflare Workers.
+
+The Worker receives a request, accepts a WebSocket connection, parses the proxy header, and opens an outbound connection. Cloudflare supplies the machines, networking stack, and runtime underneath.
+
+There is no persistent Linux daemon for me to manage. Execution is driven by incoming requests and the lifetime of their associated work and connections.
+
+### Anycast gets the client to the edge
+
+A conventional VPS usually gives the client a fixed server location. Cloudflare exposes Anycast addresses advertised from multiple places, and BGP routing helps determine which location receives the connection.
+
+That is often a nearby or well-connected location, but “nearest” is a network-routing decision, not a promise about physical distance. Routing policy, peering, availability, and product placement all affect where execution happens.
+
+Workers let the application run across Cloudflare’s distributed infrastructure without me deploying a separate VPS in every region. This can shorten the client-to-proxy leg. The total journey still includes the connection from Cloudflare to the target website, so edge execution does not guarantee lower end-to-end latency.
+
+### V8 isolates replace my server process
+
+Workers run JavaScript in V8 isolates rather than giving each application a dedicated guest operating system.
+
+V8 is Google’s open-source JavaScript engine, written in C++ and originally built for Chrome. It can also be embedded outside a browser: Node.js and Cloudflare Workers both use it, although they expose different APIs and execution environments.
+
+An isolate has its own JavaScript heap and garbage-collection state. Multiple isolates can share a runtime process while keeping their JavaScript execution environments separate. The platform adds further controls around that isolation.
+
+The useful comparison is architectural, rather than a fixed benchmark:
+
+| Approach | What gets isolated | Startup and resource implications |
+| --- | --- | --- |
+| Virtual machine | A guest operating system behind a virtual hardware boundary | Usually the heaviest unit; startup depends on the image and platform |
+| Container | Processes sharing a host kernel, separated by OS controls | Usually lighter than a full VM; startup and memory use vary |
+| V8 isolate | A JavaScript execution environment with its own heap | Lightweight enough for dense, low-startup-overhead execution |
+
+A VM does not have to boot for every request, and a container does not always take seconds to start. Likewise, an isolate does not have a universal kilobyte-sized memory footprint. The point is that Cloudflare can reuse a lightweight execution environment instead of provisioning an operating system for each invocation.
+
+The environment should still be treated as stateless between requests. An isolate may be reused, but its memory is not durable storage, and a new request is not guaranteed to reach the same instance.
+
+### How JavaScript keeps up
+
+V8 does more than read JavaScript source line by line. It uses a tiered execution pipeline.
+
+First, source is parsed into a structural representation, an Abstract Syntax Tree. V8’s Ignition interpreter executes generated bytecode, allowing execution to begin without waiting for full optimization. Depending on the V8 version and configuration, additional compilation tiers can turn frequently executed code into native machine code. TurboFan is one of V8’s optimizing compilers; modern pipelines can include other tiers as well.
+
+That is the general idea behind just-in-time compilation: start running, collect information about the code, and optimize useful paths as execution continues. If assumptions made during optimization stop holding, the engine can fall back to a less optimized tier.
+
+This does not mean the entire script is reparsed and optimized from scratch for every WebSocket message. Runtime reuse and compilation caching can avoid repeated work. It also does not mean JavaScript performs every networking operation itself. Cloudflare’s runtime and underlying operating systems handle the actual network I/O.
+
+The script’s main job is coordination: parse a header, authenticate a request, connect streams, and handle closure and errors.
+
+## Following one connection through the whole thing
+
+Now suppose I open `youtube.com` through the configured client. Here is what happens along the path.
+
+### 1. The client wraps the request
+
+A client such as v2rayN or v2rayNG receives the application’s traffic through whatever local proxy or tunnel mode is configured. It prepares a VLESS request identifying the destination, carries it over WebSocket, and protects that connection with TLS.
+
+There can be two separate TLS layers involved. The outer TLS connection runs between the proxy client and Cloudflare. If the destination is an HTTPS website, the browser’s own TLS connection to that website travels inside the tunnel.
+
+That inner encryption is important: terminating the outer TLS connection at Cloudflare does not, by itself, decrypt the browser’s HTTPS session with YouTube.
+
+### 2. Cloudflare terminates the outer TLS connection
+
+The connection reaches Cloudflare, whose edge infrastructure handles the TLS handshake using a certificate valid for the Worker’s hostname.
+
+To a local observer, this is an encrypted connection to Cloudflare infrastructure. The VLESS payload is hidden inside it. Cloudflare’s shared infrastructure can make broad IP blocking costly because unrelated sites may be affected, but it does not prevent selective blocking or make Cloudflare unreachable to censors.
+
+After TLS termination, the HTTP request is available to the Worker.
+
+### 3. The Worker accepts the WebSocket upgrade
+
+The script checks whether the request asks to upgrade to WebSocket. For the supported path, it accepts the upgrade and establishes a persistent, bidirectional channel with the client.
+
+At this point, the Worker has the client-facing half of the relay. It still needs to find out who is connecting and where they want to go.
+
+### 4. The script reads the VLESS header
+
+The first protocol bytes contain the information needed to start forwarding. Two fields are especially important:
+
+- **The UUID**, used as the client credential. The script compares it with the configured value and rejects a request that fails authentication.
+- **The destination address and port**, such as `youtube.com:443`, which tell the Worker where to open the outbound connection.
+
+The protocol also includes fields such as version, options, command, and address type. Correct parsing needs to account for those fields and for how bytes arrive; a transport chunk is not automatically a complete protocol header.
+
+The UUID should be treated as a secret. Its presence is authentication logic, not an extra encryption layer.
+
+The project can have protocol-specific handling for alternatives such as Trojan, but those paths have their own authentication and framing. This walkthrough follows the VLESS path.
+
+### 5. Web Streams organize the bytes
+
+Inside the Worker, streams provide the abstraction for moving data:
+
+- A `ReadableStream` supplies incoming chunks.
+- A `WritableStream` accepts outgoing chunks.
+
+These are Web Streams API concepts, also used in browsers for processing responses, downloads, and other incremental data.
+
+The Worker does not expose an ordinary Linux environment where my JavaScript opens arbitrary Berkeley sockets through system calls. That does not mean there is no operating system underneath. It means the application uses the networking interfaces Cloudflare exposes.
+
+WebSocket messages also need to be adapted to streams where the implementation uses stream piping. A WebSocket is not automatically a pair of Web Streams just because it carries bidirectional traffic.
+
+### 6. `cloudflare:sockets` opens the outbound connection
+
+The key capability is the `connect()` API from `cloudflare:sockets`. It lets the Worker initiate an outbound TCP connection and obtain readable and writable streams for it.
+
+Ordinary `fetch()` is useful for HTTP requests, but an arbitrary TCP byte stream is a different interface. A general TCP relay needs to pass through bytes that may not represent an HTTP request the Worker itself can reconstruct with `fetch()`.
+
+The script uses the parsed hostname or IP address and port to open that outbound connection. Platform restrictions still apply: this is not unrestricted access to every address, port, or network, and a TCP API does not supply arbitrary UDP sockets.
+
+### 7. Destination DNS can happen beyond the local network
+
+If the client passes `youtube.com` as a domain name rather than resolving it locally, the outbound connection can rely on resolution on Cloudflare’s side.
+
+That avoids relying on a local DNS answer for that destination, which is useful when local DNS is poisoned or blocked. It does not automatically eliminate every local DNS lookup: the client still needs a way to reach the Worker hostname, and client configuration determines which other lookups happen locally.
+
+The destination lookup and outbound connection happen beyond the local network’s direct view. There is no need to assume a particular internal resolver or claim that resolution is instantaneous to explain the benefit.
+
+### 8. The edge connects to the website
+
+The Worker now has two connections to join:
+
+- An inbound WebSocket connection to the proxy client.
+- An outbound TCP connection to the requested destination.
+
+The destination sees a Cloudflare-side egress address rather than the client’s original public IP. That egress location should not be assumed to match the ingress location exactly.
+
+The local network can observe the client-to-Cloudflare leg, but it does not directly observe the separate Cloudflare-to-destination connection. Cloudflare, meanwhile, handles the relay and can see the destination information used to create it. For HTTPS traffic, the application’s inner TLS layer continues to protect its content unless something separately intercepts that session.
+
+### 9. The Worker joins the streams
+
+With both sides available, the script forwards client bytes into the outbound socket and returns destination bytes through the WebSocket.
+
+The Web Streams method `.pipeTo()` is useful for connecting a readable source to a writable destination. Implementations can use it alongside custom adapters for WebSocket messages and response framing.
+
+There is still real engineering here. Backpressure, connection closure, cancellation, errors, and partial data need handling. Without that, a relay that works for a small request can fail under a slower receiver or a longer connection.
+
+This is application-level byte forwarding. The Worker is not running my own kernel IP router, and it does not literally disappear once piping begins. The runtime continues executing the relay logic and servicing the connection.
+
+### 10. The VLESS response frames the return traffic
+
+Before returning the destination payload, the server sends the VLESS response header. A minimal response is commonly represented as `[0, 0]`: protocol version zero and an additional-information length of zero.
+
+That is protocol framing, rather than a rich status message guaranteeing that the website has successfully loaded. Once the header has been handled, the client can interpret the following bytes as the relayed response.
+
+From there, the same basic operation repeats: receive bytes on one side, send them to the other, and keep doing that until the connection ends.
+
+## And then I got banned
+
+After all that, the ending was considerably less technical:
+
+> Cloudflare received an Network abuse regarding: `night-crawling[.]matintavakoli1385[.]workers[.]dev.`
+
+That was the abuse notice attached to the experiment. I do not have enough information in that message to explain the exact detection method, the particular traffic that triggered it, or the reasoning behind the enforcement. Inventing a clever explanation would make the ending neater, but it would still be invented.
+
+What I can say is that getting the architecture to work and having the provider allow it to keep running are separate problems. The technical ability to accept WebSockets and open TCP connections does not amount to permission to operate any service built from them.
+
+## What I got out of it
+
+The ban makes for a better title, but the architecture is the part I wanted to write down.
+
+A conventional proxy and this Worker setup ultimately perform a familiar job: accept a client connection, identify a destination, create another connection, and move bytes between them. The difference is where those responsibilities live. On a VPS, I manage the process and server environment. In a Worker, I write the protocol and forwarding logic while the platform supplies execution, TLS termination, placement, and networking APIs.
+
+That also puts “serverless” into perspective. There are still servers, kernels, sockets, and routing decisions. I just do not get a shell on the machine handling them.
+
+I ended up tracing a request through proxy protocols, WebSocket framing, TLS, Anycast routing, V8 execution, DNS resolution, and stream forwarding—all to understand how one JavaScript file could stand in for the server I would normally rent.
+
+And then the abuse notice arrived.
+
+Do not try this at home. I already did the networking homework.
